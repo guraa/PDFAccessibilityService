@@ -6,21 +6,31 @@ import com.itextpdf.kernel.pdf.canvas.parser.EventType;
 import com.itextpdf.kernel.pdf.canvas.parser.data.IEventData;
 import com.itextpdf.kernel.pdf.canvas.parser.data.TextRenderInfo;
 import com.itextpdf.kernel.pdf.canvas.parser.listener.LocationTextExtractionStrategy;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 
 public class CustomTextRenderListener extends LocationTextExtractionStrategy {
 
-    private String extractedFontName;
-    private float extractedFontSize;
-    private Color extractedFontColor;
-    private StringBuilder extractedText = new StringBuilder();
-    private Rectangle filterRectangle;
+    private static final Logger logger = LoggerFactory.getLogger(CustomTextRenderListener.class);
 
-    // List to store each line's text along with its exact position
+    private String extractedFontName;
+    private float extractedFontSize = 10;
+    private Color extractedFontColor;
+
+    private StringBuilder extractedText = new StringBuilder();
+    private StringBuilder canonicalText = new StringBuilder();
+
+    private Rectangle filterRectangle;
     private final List<TextWithPosition> textWithPositionList = new ArrayList<>();
 
-    // Constructor accepts a rectangle filter
+    private float lastY = -1;
+    private float lastFontSize = 10;
+
     public CustomTextRenderListener(Rectangle filterRectangle) {
         this.filterRectangle = filterRectangle;
     }
@@ -29,29 +39,81 @@ public class CustomTextRenderListener extends LocationTextExtractionStrategy {
     public void eventOccurred(IEventData data, EventType type) {
         if (type == EventType.RENDER_TEXT) {
             TextRenderInfo renderInfo = (TextRenderInfo) data;
-
-            // Get the bounding box of the text
             Rectangle textRect = renderInfo.getDescentLine().getBoundingRectangle();
 
-            // Check if the text is within the filter rectangle
             if (filterRectangle != null && textRect != null && rectanglesIntersect(filterRectangle, textRect)) {
-                // Store the text and its properties if it's within the region
-                extractedFontName = renderInfo.getFont().getFontProgram().getFontNames().getFontName();
-                extractedFontSize = renderInfo.getFontSize();
-                extractedFontColor = renderInfo.getFillColor();
                 String text = renderInfo.getText();
+                float currentY = textRect.getY();
+                float currentFontSize = renderInfo.getFontSize();
+                float yDiff = (lastY != -1) ? Math.abs(lastY - currentY) : 0;
+
+                // Save the text and coordinates
+                canonicalText.append(String.format("[%s | Y=%.2f | FontSize=%.2f] ", text, currentY, currentFontSize));
                 extractedText.append(text);
 
-                // Add the text and its exact bounding box coordinates to the list
+                lastY = currentY;
+                lastFontSize = currentFontSize;
+
+                extractedFontName = renderInfo.getFont().getFontProgram().getFontNames().getFontName();
+                extractedFontSize = currentFontSize;
+                extractedFontColor = renderInfo.getFillColor();
+
                 textWithPositionList.add(new TextWithPosition(text, textRect, extractedFontName, extractedFontSize, extractedFontColor));
             }
         }
-
-        // Call the parent method for normal text extraction behavior
         super.eventOccurred(data, type);
     }
 
-    // Method to check if two rectangles intersect
+    // New method to preprocess Y-coordinates and adjust spacing
+    public void preprocessYCoordinates() {
+        if (textWithPositionList.isEmpty()) {
+            return;
+        }
+
+        // Sort text by Y-coordinate (descending, since PDF coordinates are inverted)
+        Collections.sort(textWithPositionList, Comparator.comparingDouble((TextWithPosition t) -> t.getBoundingBox().getY()).reversed());
+
+        StringBuilder adjustedText = new StringBuilder();
+        float previousY = -1;
+
+        for (TextWithPosition textPosition : textWithPositionList) {
+            float currentY = textPosition.getBoundingBox().getY();
+            float fontSize = textPosition.getFontSize();
+            float lineSpacingThreshold = Math.max(fontSize * 1.0f, 7);
+            float paragraphSpacingThreshold = Math.max(fontSize * 3.0f, 12);
+
+            // Calculate Y difference for line/paragraph breaks
+            if (previousY != -1) {
+                float yDiff = Math.abs(previousY - currentY);
+
+                logger.info("yDiff: " + yDiff + " lineSpacingThreshold: " + lineSpacingThreshold + " paragraphSpacingThreshold: " + paragraphSpacingThreshold);
+
+                if (yDiff > paragraphSpacingThreshold) {
+                    adjustedText.append("\n\n");  // Paragraph break
+                } else if (yDiff > lineSpacingThreshold) {
+                    adjustedText.append("\n");  // Single line break
+                }
+            }
+
+            adjustedText.append(textPosition.getText());
+            previousY = currentY;
+        }
+
+        // Replace the extracted text with the adjusted one
+        extractedText = adjustedText;
+    }
+
+    // Return clean text without Y-coordinates (for reinsertion)
+    public String getCleanExtractedText() {
+        return extractedText.toString();
+    }
+
+    // Log canonical format (for debugging purposes)
+    public String getCanonicalExtractedText() {
+        return canonicalText.toString();
+    }
+
+    // Check for rectangle intersection
     private boolean rectanglesIntersect(Rectangle r1, Rectangle r2) {
         return r1.getX() < r2.getX() + r2.getWidth() &&
                 r1.getX() + r1.getWidth() > r2.getX() &&
@@ -59,7 +121,6 @@ public class CustomTextRenderListener extends LocationTextExtractionStrategy {
                 r1.getY() + r1.getHeight() > r2.getY();
     }
 
-    // Accessors
     public String getExtractedFontName() {
         return extractedFontName;
     }
@@ -72,15 +133,10 @@ public class CustomTextRenderListener extends LocationTextExtractionStrategy {
         return extractedFontColor;
     }
 
-    public String getExtractedText() {
-        return extractedText.toString();
-    }
-
     public List<TextWithPosition> getTextWithPositionList() {
         return textWithPositionList;
     }
 
-    // Inner class to hold text with position information
     public static class TextWithPosition {
         private final String text;
         private final Rectangle boundingBox;
